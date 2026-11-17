@@ -1,63 +1,12 @@
 // JD 匹配助手 - 弹窗逻辑
-
-const STORAGE_KEY = {
-  apiKey: 'apiKey',
-  profile: 'profile',
-  resumeText: 'resumeText',
-  history: 'history',
-};
-
-const HISTORY_LIMIT = 5;
+// 共享的常量、提示词与纯函数在 shared.js；后台截图全链路在 background.js。
 
 const state = {
-  apiKey: '',
   profile: null,
   resumeText: '',
   currentJD: { title: '', url: '', text: '' },
   currentMatch: null,
 };
-
-// ===== 提示词 =====
-const RESUME_SYSTEM_PROMPT = `你是一位资深招聘与简历分析专家。用户会提供一份简历文本，请提取并整理成结构化的「简历画像」，用于后续与岗位 JD 做匹配。
-
-请只输出一个 JSON 对象，不要输出任何其他文字或解释。JSON 结构如下：
-{
-  "summary": "一句话个人概述，例如「5 年经验的 Java 后端工程师，方向偏分布式系统」",
-  "skills": ["技能1", "技能2"],
-  "keywords": ["可用于匹配的关键词标签：技术栈、行业、证书、工具等"],
-  "experience": [{"company": "公司", "title": "职位", "duration": "时间段", "highlights": ["核心亮点"]}],
-  "education": [{"school": "学校", "degree": "学历", "major": "专业", "time": "时间"}],
-  "projects": [{"name": "项目名", "description": "一句话描述"}],
-  "certifications": ["证书/奖项"],
-  "hardRequirements": {"degree": "最高学历", "yearsOfExperience": "工作年限", "techStack": ["核心技术栈"]},
-  "strengths": ["核心竞争优势"]
-}
-
-要求：忠实于简历原文，不要编造简历中不存在的信息；缺少的字段用空数组 [] 或空字符串 "" 表示。`;
-
-const MATCH_SYSTEM_PROMPT = `你是一位资深招聘专家。你会收到一份「简历画像」（JSON）和一份「岗位 JD」文本，请评估候选人与该岗位的匹配度。
-
-请只输出一个 JSON 对象，不要输出任何其他文字。JSON 结构如下：
-{
-  "score": 0到100的整数匹配度评分,
-  "successRate": "高" 或 "中" 或 "低",
-  "successRateNote": "一句话说明投递成功率的判断依据",
-  "matches": ["命中点：JD 要求且候选人具备的，每条一句话，最多5条"],
-  "gaps": ["差距点：JD 要求但候选人缺少或简历未体现的，每条一句话，最多5条"],
-  "resumeSuggestions": ["针对该岗位的简历优化建议，具体可操作，最多5条"],
-  "interviewTips": ["面试可能被问到的问题或准备要点，最多5条"],
-  "summary": "总体一句话评价"
-}
-
-评分要客观：综合考虑学历、年限、技能、经验相关度等硬性条件；不要为了安慰而虚高。`;
-
-const GREETING_SYSTEM_PROMPT = `你是求职沟通专家。请根据「简历画像」、「岗位 JD」以及匹配结果，生成一条用于招聘平台主动联系招聘方的「打招呼语」。
-
-要求：
-- 字数控制在 50～80 个汉字之间
-- 结构：一句自我介绍 + 一个最突出的匹配点 + 一句行动邀请（如「期待进一步沟通」）
-- 语气真诚、简洁、专业，不要夸大，不要使用表情符号
-- 只输出一个 JSON 对象，不要输出其他文字。结构：{"greeting": "招呼语内容", "length": 字数}`;
 
 // ===== 初始化 =====
 document.addEventListener('DOMContentLoaded', init);
@@ -65,21 +14,24 @@ document.addEventListener('DOMContentLoaded', init);
 async function init() {
   pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdf.worker.min.js');
   bindEvents();
+  onStorageChanged();
 
-  const data = await chrome.storage.local.get([STORAGE_KEY.apiKey, STORAGE_KEY.profile, STORAGE_KEY.resumeText, STORAGE_KEY.history]);
-  state.apiKey = data[STORAGE_KEY.apiKey] || '';
+  const data = await chrome.storage.local.get([
+    STORAGE_KEY.apiKey, STORAGE_KEY.profile, STORAGE_KEY.resumeText,
+    STORAGE_KEY.history, STORAGE_KEY.shotStatus,
+  ]);
   state.profile = data[STORAGE_KEY.profile] || null;
   state.resumeText = data[STORAGE_KEY.resumeText] || '';
 
-  document.getElementById('api-key').value = state.apiKey;
-  if (state.resumeText) {
-    document.getElementById('resume-text').value = state.resumeText;
-  }
+  document.getElementById('resume-text').value = state.resumeText;
   if (state.profile) {
     renderProfile(state.profile);
     setStatus('profile', `已有简历画像（更新于 ${formatTime(state.profile.updatedAt)}）`, 'ok');
   }
   renderHistory(data[STORAGE_KEY.history] || []);
+
+  // 恢复后台截图任务的进度/结果
+  if (data[STORAGE_KEY.shotStatus]) handleShotStatus(data[STORAGE_KEY.shotStatus]);
 }
 
 function bindEvents() {
@@ -89,7 +41,6 @@ function bindEvents() {
 
   document.getElementById('save-key').addEventListener('click', saveApiKey);
   document.getElementById('api-key').addEventListener('change', saveApiKey);
-
   document.getElementById('resume-file').addEventListener('change', onFileChange);
 
   const textarea = document.getElementById('resume-text');
@@ -100,9 +51,10 @@ function bindEvents() {
 
   document.getElementById('analyze-resume').addEventListener('click', analyzeResume);
   document.getElementById('analyze-jd').addEventListener('click', analyzeJD);
+  document.getElementById('analyze-jd-shot').addEventListener('click', analyzeJDByShot);
 }
 
-// ===== 通用工具 =====
+// ===== 通用 =====
 function setStatus(tab, msg, type) {
   const id = tab === 'profile' ? 'profile-status' : 'match-status';
   const el = document.getElementById(id);
@@ -115,38 +67,6 @@ function switchTab(name) {
   document.querySelectorAll('.panel').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + name));
 }
 
-function escapeHtml(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function formatTime(ts) {
-  if (!ts) return '';
-  const d = new Date(ts);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-function parseJSON(text) {
-  if (!text) throw new Error('AI 返回内容为空');
-  let t = String(text).trim();
-  t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
-  try {
-    return JSON.parse(t);
-  } catch (_) {
-    const start = t.indexOf('{');
-    const end = t.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      try { return JSON.parse(t.slice(start, end + 1)); } catch (_) {}
-    }
-    throw new Error('AI 返回的 JSON 无法解析');
-  }
-}
-
 let resumeSaveTimer = null;
 function debounceSaveResumeText() {
   clearTimeout(resumeSaveTimer);
@@ -155,22 +75,20 @@ function debounceSaveResumeText() {
   }, 600);
 }
 
+// apiKey 由 background 从 storage 读取，这里不再传
 function callDeepSeek(messages, opts = {}) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({
       type: 'callDeepSeek',
       payload: {
-        apiKey: state.apiKey,
         messages,
         jsonMode: !!opts.jsonMode,
         temperature: opts.temperature,
         maxTokens: opts.maxTokens,
+        model: opts.model,
       },
     }, (resp) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
+      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
       if (resp && resp.error) reject(new Error(resp.error));
       else if (resp && resp.content) resolve(resp.content);
       else reject(new Error('后台返回异常'));
@@ -180,9 +98,9 @@ function callDeepSeek(messages, opts = {}) {
 
 // ===== API Key =====
 async function saveApiKey() {
-  state.apiKey = document.getElementById('api-key').value.trim();
-  await chrome.storage.local.set({ [STORAGE_KEY.apiKey]: state.apiKey });
-  setStatus('profile', state.apiKey ? 'API Key 已保存 ✓' : 'API Key 已清空', state.apiKey ? 'ok' : '');
+  const key = document.getElementById('api-key').value.trim();
+  await chrome.storage.local.set({ [STORAGE_KEY.apiKey]: key });
+  setStatus('profile', key ? 'API Key 已保存 ✓' : 'API Key 已清空', key ? 'ok' : '');
 }
 
 // ===== 简历 =====
@@ -190,24 +108,22 @@ async function onFileChange(e) {
   const file = e.target.files && e.target.files[0];
   if (!file) return;
   const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
-  if (!isPdf) {
-    setStatus('profile', '仅支持 PDF 文件', 'error');
-    return;
-  }
+  if (!isPdf) { setStatus('profile', '仅支持 PDF 文件', 'error'); return; }
+
   setStatus('profile', '正在解析 PDF…', 'loading');
   try {
     const buf = await file.arrayBuffer();
     const text = await extractPdfText(buf);
     if (!text) {
-      setStatus('profile', '未解析出文字（可能是扫描版 PDF），请改用下方手动粘贴', 'error');
+      setStatus('profile', '未解析出文字（可能是扫描版 PDF），请改用手动粘贴', 'error');
       return;
     }
     state.resumeText = text;
     document.getElementById('resume-text').value = text;
     await chrome.storage.local.set({ [STORAGE_KEY.resumeText]: text });
-    setStatus('profile', `已解析 PDF，共约 ${text.length} 字。请点击「分析简历」`, 'ok');
+    setStatus('profile', `已解析 PDF，共约 ${text.length} 字，请点击「分析简历」`, 'ok');
   } catch (err) {
-    setStatus('profile', `PDF 解析失败：${err.message}（可改用手动粘贴）`, 'error');
+    setStatus('profile', `PDF 解析失败：${friendlyError(err)}（可改用手动粘贴）`, 'error');
   }
 }
 
@@ -217,36 +133,26 @@ async function extractPdfText(arrayBuffer) {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    const parts = content.items.map((it) => (it && 'str' in it ? it.str : ''));
-    text += parts.join(' ') + '\n\n';
+    text += content.items.map((it) => (it && 'str' in it ? it.str : '')).join(' ') + '\n\n';
   }
   return text.trim();
 }
 
 async function analyzeResume() {
   const text = document.getElementById('resume-text').value.trim();
-  if (!text) {
-    setStatus('profile', '请先上传 PDF 或粘贴简历文字', 'error');
-    switchTab('resume');
-    return;
-  }
-  if (!state.apiKey) {
-    setStatus('profile', '请先填写并保存 API Key', 'error');
-    return;
-  }
+  if (!text) { setStatus('profile', '请先上传 PDF 或粘贴简历文字', 'error'); return; }
 
   const btn = document.getElementById('analyze-resume');
   btn.disabled = true;
-  setStatus('profile', '正在分析简历，生成 AI 画像…', 'loading');
+  setStatus('profile', '正在分析简历，生成画像…', 'loading');
   try {
     const content = await callDeepSeek(
       [
         { role: 'system', content: RESUME_SYSTEM_PROMPT },
         { role: 'user', content: text },
       ],
-      { jsonMode: true, temperature: 0.2, maxTokens: 2500 }
+      { jsonMode: true, temperature: 0.2, maxTokens: MAX_OUTPUT_TOKENS }
     );
-
     const profile = parseJSON(content);
     profile.updatedAt = Date.now();
     state.profile = profile;
@@ -255,7 +161,7 @@ async function analyzeResume() {
     renderProfile(profile);
     setStatus('profile', '画像已生成并保存 ✓', 'ok');
   } catch (err) {
-    setStatus('profile', '分析失败：' + err.message, 'error');
+    setStatus('profile', '分析失败：' + friendlyError(err), 'error');
   } finally {
     btn.disabled = false;
   }
@@ -271,11 +177,25 @@ function renderProfile(p) {
     .join('<br>');
   const tags = (p.keywords || []).slice(0, 24).map((k) => `<span class="tag">${escapeHtml(k)}</span>`).join('');
 
+  const projHtml = (p.projects || []).map((pr) => {
+    const stack = (pr.techStack || []).map(escapeHtml).join(' / ');
+    const highlights = (pr.highlights || []).map((h) => `<li>${escapeHtml(h)}</li>`).join('');
+    return `<div class="profile-section">
+      <div><strong>${escapeHtml(pr.name || '')}</strong>${pr.role ? `（${escapeHtml(pr.role)}）` : ''}${stack ? ` <span class="hint">${stack}</span>` : ''}</div>
+      ${highlights ? `<ul>${highlights}</ul>` : ''}
+    </div>`;
+  }).join('');
+
+  const hr = p.hardRequirements || {};
+  const hrText = [hr.degree, hr.major, hr.yearsOfExperience, (hr.techStack || []).join(' / ')].filter(Boolean).join(' · ');
+
   el.innerHTML = `
     <div class="card">
       <div class="profile-section"><strong>概述：</strong>${escapeHtml(p.summary || '')}</div>
+      ${hrText ? `<div class="profile-section"><h4>硬性条件</h4><div>${escapeHtml(hrText)}</div></div>` : ''}
       ${tags ? `<div class="profile-section"><h4>关键词标签</h4><div class="tag-list">${tags}</div></div>` : ''}
       ${exp ? `<div class="profile-section"><h4>工作经历</h4><div>${exp}</div></div>` : ''}
+      ${projHtml ? `<div class="profile-section"><h4>项目经历</h4>${projHtml}</div>` : ''}
       ${edu ? `<div class="profile-section"><h4>教育背景</h4><div>${edu}</div></div>` : ''}
       ${(p.strengths && p.strengths.length) ? `<div class="profile-section"><h4>核心优势</h4><ul>${p.strengths.map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ul></div>` : ''}
       ${(p.certifications && p.certifications.length) ? `<div class="profile-section"><h4>证书 / 奖项</h4><div>${p.certifications.map(escapeHtml).join('、')}</div></div>` : ''}
@@ -284,7 +204,7 @@ function renderProfile(p) {
   el.classList.remove('hidden');
 }
 
-// ===== JD 匹配 =====
+// ===== 文本 JD 分析（popup 保持打开，不涉及页面点击） =====
 function extractJDFromTab(tabId) {
   return new Promise((resolve, reject) => {
     chrome.scripting.executeScript(
@@ -292,51 +212,80 @@ function extractJDFromTab(tabId) {
         target: { tabId },
         func: () => {
           const clean = (s) => String(s || '')
-            .replace(/ /g, ' ')
+            .replace(/ /g, ' ')
             .replace(/[ \t]+/g, ' ')
             .replace(/\n{3,}/g, '\n\n')
             .trim();
 
+          const SITE_SELECTORS = [
+            '.job-detail', '.job-detail-section', '.desc', '.job-sec-text', '.b-job-description',
+            '.job-detail', '.position-description', '.job-description', '.summary-content',
+            '.job-detail', '.tCompany_main', '.job_msg', '.bmsg.job_msg',
+            '.job-detail', '.describtion', '.job_primary', '.position-detail',
+            'main', 'article', '[role="main"]',
+            '.job-description', '.job_description', '.job-detail-content',
+            '.description', '.detail-content', '.job-description-content',
+            '.position-info', '.job-info',
+          ];
+          const NOISE_SELECTORS = [
+            'aside', 'nav', 'footer', 'header', '.sidebar', '.side-bar', '.recommend',
+            '.recommend-job', '.job-recommend', '.related-job', '.company-info', '.company-detail',
+            '.footer', '.header', '.nav', '.breadcrumb', '.faq', '.feedback', '.advert',
+            '.rec-list', '.hot-job', '.similar-job', '.right-bar', '.side-bar-right',
+          ];
+          const NOISE_KEYWORDS = [
+            '推荐职位', '相似职位', '相关职位', '热门职位', '公司介绍', '公司福利',
+            '职位对比', '附近职位', '最新职位', '查看更多', '扫码', '下载APP',
+            '版权所有', 'ICP备案', '免责声明', '猜你喜欢', '大家都在看',
+          ];
+          const cloneWithoutNoise = (root) => {
+            const el = root.cloneNode(true);
+            NOISE_SELECTORS.forEach((sel) => el.querySelectorAll(sel).forEach((n) => n.remove()));
+            return el;
+          };
+          const scoreBlock = (text) => {
+            if (!text) return -1;
+            const t = text.trim();
+            if (t.length < 60) return -1;
+            let score = t.length;
+            ['岗位职责', '任职要求', '职位要求', '岗位要求', '职责描述', '任职资格', '技能要求', '职位描述']
+              .forEach((kw) => { if (t.includes(kw)) score += 300; });
+            NOISE_KEYWORDS.forEach((kw) => { if (t.includes(kw)) score -= 120; });
+            score += (t.match(/\n/g) || []).length * 5;
+            return score;
+          };
           const getMain = () => {
-            const selectors = [
-              'main', 'article', '[role="main"]',
-              '.job-detail', '.job_detail', '.jobDetail', '.job-description', '.job_description', '.job-detail-content',
-              '.description', '.detail-content', '.job-description-content',
-            ];
-            for (const sel of selectors) {
-              const el = document.querySelector(sel);
-              if (el && el.innerText && el.innerText.trim().length > 100) {
-                return el.innerText;
-              }
+            let bestText = ''; let bestScore = -1;
+            for (const sel of SITE_SELECTORS) {
+              document.querySelectorAll(sel).forEach((node) => {
+                const t = clean(cloneWithoutNoise(node).innerText);
+                const s = scoreBlock(t);
+                if (s > bestScore) { bestScore = s; bestText = t; }
+              });
             }
-            let best = '';
+            if (bestScore > 200) return bestText;
+
+            let fallback = ''; let fallbackScore = -1;
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
             let node;
             while ((node = walker.nextNode())) {
               if (!node.children || node.children.length === 0) continue;
-              const t = node.innerText;
-              if (t && t.trim().length > best.length) best = t;
-              if (best.length > 20000) break;
+              const t = clean(cloneWithoutNoise(node).innerText);
+              const s = scoreBlock(t);
+              if (s > fallbackScore) { fallbackScore = s; fallback = t; }
+              if (fallback.length > 20000) break;
             }
-            return best || document.body.innerText;
+            return fallback || clean(document.body.innerText);
           };
 
           const selected = window.getSelection ? window.getSelection().toString() : '';
           const sel = clean(selected);
-          const text = sel.length >= 20 ? sel : clean(getMain());
-          return {
-            title: document.title || '',
-            url: location.href || '',
-            selected: sel,
-            text,
-          };
+          const text = sel.length >= 20 ? sel : getMain();
+          return { title: document.title || '', url: location.href || '', selected: sel, text };
         },
       },
       (results) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
+        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
         const r = results && results[0] && results[0].result;
         if (r) resolve(r);
         else reject(new Error('无法读取当前页面内容'));
@@ -346,16 +295,7 @@ function extractJDFromTab(tabId) {
 }
 
 async function analyzeJD() {
-  if (!state.apiKey) {
-    setStatus('match', '请先在「简历」页填写 API Key', 'error');
-    switchTab('resume');
-    return;
-  }
-  if (!state.profile) {
-    setStatus('match', '请先在「简历」页生成简历画像', 'error');
-    switchTab('resume');
-    return;
-  }
+  if (!state.profile) { setStatus('match', '请先在「简历」页生成简历画像', 'error'); return; }
 
   const btn = document.getElementById('analyze-jd');
   btn.disabled = true;
@@ -366,40 +306,102 @@ async function analyzeJD() {
     if (tab.url && /^(chrome|edge|about|chrome-extension|devtools):/i.test(tab.url)) {
       throw new Error('无法在浏览器内部页面使用，请打开普通的 JD 网页');
     }
-
     const jd = await extractJDFromTab(tab.id);
     if (!jd.text || jd.text.trim().length < 20) {
-      throw new Error('页面内容过少，请手动选中 JD 正文文字后再试');
+      throw new Error('页面内容过少，请手动选中 JD 正文，或改用截图框选');
     }
-    state.currentJD = jd;
-
-    setStatus('match', '正在分析匹配度…', 'loading');
-    const content = await callDeepSeek(
-      [
-        { role: 'system', content: MATCH_SYSTEM_PROMPT },
-        { role: 'user', content: buildMatchUserMessage() },
-      ],
-      { jsonMode: true, temperature: 0.2, maxTokens: 2000 }
-    );
-
-    const match = parseJSON(content);
-    state.currentMatch = match;
-    await addHistory(match, jd);
-
-    renderMatch(match, { withGreeting: true });
-    setStatus('match', '分析完成 ✓', 'ok');
+    jd.profileSnapshot = state.profile;
+    await runMatchAnalysis(jd);
   } catch (err) {
-    setStatus('match', '分析失败：' + err.message, 'error');
+    setStatus('match', '分析失败：' + friendlyError(err), 'error');
   } finally {
     btn.disabled = false;
   }
 }
 
-function buildMatchUserMessage() {
-  const jdText = state.currentJD.text.slice(0, 8000);
-  return `简历画像：\n${JSON.stringify(state.profile, null, 2)}\n\n岗位 JD：\n${jdText}`;
+async function runMatchAnalysis(jd) {
+  state.currentJD = jd;
+  document.getElementById('shot-progress').classList.add('hidden');
+  setStatus('match', '正在分析匹配度…', 'loading');
+  const content = await callDeepSeek(
+    [
+      { role: 'system', content: MATCH_SYSTEM_PROMPT },
+      { role: 'user', content: buildMatchUserMessage(state.profile, jd.text) },
+    ],
+    { jsonMode: true, temperature: 0.2, maxTokens: MAX_OUTPUT_TOKENS }
+  );
+  const match = normalizeMatch(parseJSON(content));
+  state.currentMatch = match;
+  await addHistory(match, jd);
+
+  renderMatch(match, { withGreeting: true });
+  setStatus('match', '分析完成 ✓', 'ok');
 }
 
+// ===== 截图框选：仅启动后台，进度走 storage =====
+async function analyzeJDByShot() {
+  if (!state.profile) { setStatus('match', '请先在「简历」页生成简历画像', 'error'); return; }
+
+  const btn = document.getElementById('analyze-jd-shot');
+  btn.disabled = true;
+  try {
+    const resp = await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'startShotAnalysis' }, (r) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve(r);
+      });
+    });
+    if (!resp || !resp.ok) throw new Error((resp && resp.error) || '启动失败');
+    setStatus('match', '已在页面启动框选，可关闭本弹窗，完成后回来查看', '');
+  } catch (err) {
+    setStatus('match', '分析失败：' + friendlyError(err), 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 监听后台截图状态
+function onStorageChanged() {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes[STORAGE_KEY.shotStatus]) {
+      handleShotStatus(changes[STORAGE_KEY.shotStatus].newValue);
+    }
+  });
+}
+
+function handleShotStatus(status) {
+  if (!status) return;
+  const box = document.getElementById('shot-progress');
+  const busy = ['selecting', 'capturing', 'recognizing', 'matching'].includes(status.phase);
+
+  if (busy) {
+    box.className = 'progress-box';
+    box.innerHTML = `<span class="spinner"></span><span class="progress-msg">${escapeHtml(status.message)}</span>`;
+    box.classList.remove('hidden');
+    return;
+  }
+  if (status.phase === 'done') {
+    box.className = 'progress-box done';
+    box.innerHTML = `<span class="spinner">✓</span><span class="progress-msg">${escapeHtml(status.message)}</span>`;
+    box.classList.remove('hidden');
+    if (status.match) {
+      state.currentMatch = status.match;
+      state.currentJD = status.jd || state.currentJD;
+      renderMatch(status.match, { withGreeting: true });
+    }
+    return;
+  }
+  if (status.phase === 'error') {
+    box.className = 'progress-box error';
+    box.innerHTML = `<span class="spinner">!</span><span class="progress-msg">${escapeHtml(status.message)}</span>`;
+    box.classList.remove('hidden');
+    return;
+  }
+  // canceled：隐藏进度框
+  box.classList.add('hidden');
+}
+
+// ===== 匹配结果渲染 =====
 function renderMatch(match, { withGreeting = true } = {}) {
   const view = document.getElementById('match-view');
   const scoreColor = match.score >= 70 ? '#16a34a' : match.score >= 45 ? '#d97706' : '#dc2626';
@@ -419,6 +421,13 @@ function renderMatch(match, { withGreeting = true } = {}) {
       </div>
       <p class="profile-summary"><strong>总体评价：</strong>${escapeHtml(match.summary || '')}</p>
 
+      ${(match.jdRequirements && (match.jdRequirements.hard.length || match.jdRequirements.preferred.length)) ? `
+        <div class="match-section neutral">
+          <h4>JD 要求拆解</h4>
+          ${match.jdRequirements.hard.length ? `<div class="hint">硬性门槛：</div><ul>${match.jdRequirements.hard.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>` : ''}
+          ${match.jdRequirements.preferred.length ? `<div class="hint" style="margin-top:4px">加分项：</div><ul>${match.jdRequirements.preferred.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>` : ''}
+        </div>` : ''}
+
       <div class="match-section good"><h4>✓ 命中点</h4>${list(match.matches)}</div>
       <div class="match-section bad"><h4>✗ 差距点</h4>${list(match.gaps)}</div>
       <div class="match-section neutral"><h4>简历优化建议</h4>${list(match.resumeSuggestions)}</div>
@@ -430,11 +439,10 @@ function renderMatch(match, { withGreeting = true } = {}) {
         <div id="greeting-box" class="greeting-box hidden">
           <div class="greeting-head">
             <strong>打招呼语</strong>
-            <button id="copy-greeting" class="btn btn-secondary" style="padding:4px 10px">复制</button>
+            <button id="copy-greeting" class="btn btn-outline">复制</button>
           </div>
           <div id="greeting-text"></div>
-        </div>
-      ` : ''}
+        </div>` : ''}
     </div>
   `;
   view.classList.remove('hidden');
@@ -445,7 +453,7 @@ function renderMatch(match, { withGreeting = true } = {}) {
   }
 }
 
-// ===== 打招呼语 =====
+// ===== 招呼语 =====
 async function generateGreeting() {
   if (!state.currentMatch || !state.currentJD.text) return;
   const btn = document.getElementById('gen-greeting');
@@ -457,15 +465,14 @@ async function generateGreeting() {
         { role: 'system', content: GREETING_SYSTEM_PROMPT },
         { role: 'user', content: buildGreetingUserMessage() },
       ],
-      { jsonMode: true, temperature: 0.6, maxTokens: 300 }
+      { jsonMode: true, temperature: 0.6, maxTokens: GREETING_MAX_TOKENS }
     );
-
-    const g = parseJSON(content);
-    const greeting = (g && (g.greeting || g.text)) || content;
+    const greeting = extractGreeting(content);
+    if (!greeting) throw new Error('AI 返回的 JSON 无法解析');
     document.getElementById('greeting-text').textContent = greeting;
     document.getElementById('greeting-box').classList.remove('hidden');
   } catch (err) {
-    setStatus('match', '生成打招呼语失败：' + err.message, 'error');
+    setStatus('match', '生成打招呼语失败：' + friendlyError(err), 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = '生成打招呼语';
@@ -474,8 +481,17 @@ async function generateGreeting() {
 
 function buildGreetingUserMessage() {
   const m = state.currentMatch;
-  const jdText = state.currentJD.text.slice(0, 4000);
-  return `简历画像：\n${JSON.stringify(state.profile)}\n\n岗位 JD：\n${jdText}\n\n匹配结果：\n${JSON.stringify({ score: m.score, successRate: m.successRate, matches: m.matches, summary: m.summary })}`;
+  const p = state.profile || {};
+  const slimProfile = {
+    summary: p.summary || '',
+    skills: p.skills || [],
+    keywords: p.keywords || [],
+    hardRequirements: p.hardRequirements || {},
+    strengths: p.strengths || [],
+    experience: (p.experience || []).map((e) => ({ company: e.company, title: e.title, duration: e.duration, highlights: (e.highlights || []).slice(0, 2) })),
+    projects: (p.projects || []).map((pr) => ({ name: pr.name, techStack: pr.techStack || [], highlights: (pr.highlights || []).slice(0, 2) })),
+  };
+  return `候选人画像（精简）：\n${JSON.stringify(slimProfile)}\n\n岗位 JD：\n${state.currentJD.text.slice(0, 3000)}\n\n匹配结果：\n${JSON.stringify({ score: m.score, successRate: m.successRate, matches: m.matches, gaps: m.gaps, summary: m.summary })}`;
 }
 
 async function copyGreeting() {
@@ -490,20 +506,6 @@ async function copyGreeting() {
 }
 
 // ===== 历史 =====
-async function addHistory(match, jd) {
-  const data = await chrome.storage.local.get(STORAGE_KEY.history);
-  let history = data[STORAGE_KEY.history] || [];
-  history.unshift({
-    ...match,
-    jdTitle: jd.title || jd.url,
-    jdUrl: jd.url,
-    date: new Date().toISOString(),
-  });
-  if (history.length > HISTORY_LIMIT) history = history.slice(0, HISTORY_LIMIT);
-  await chrome.storage.local.set({ [STORAGE_KEY.history]: history });
-  renderHistory(history);
-}
-
 function renderHistory(history) {
   const el = document.getElementById('history-view');
   if (!history || !history.length) {
@@ -524,7 +526,8 @@ function renderHistory(history) {
     item.addEventListener('click', () => {
       const h = history[Number(item.dataset.index)];
       state.currentMatch = { ...h };
-      state.currentJD = { title: h.jdTitle, url: h.jdUrl, text: '' };
+      state.currentJD = { title: h.jdTitle, url: h.jdUrl, text: h.jdText || '' };
+      if (h.profileSnapshot) state.profile = h.profileSnapshot;
       renderMatch(state.currentMatch, { withGreeting: false });
       switchTab('match');
     });

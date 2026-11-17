@@ -9,20 +9,39 @@
   <header class="app-header">
     <div class="logo">JD 匹配助手</div>
     <nav class="tabs">
-      <button class="tab active" data-tab="resume">简历</button>
-      <button class="tab" data-tab="match">匹配</button>
+      <button class="tab active" data-tab="match">匹配</button>
       <button class="tab" data-tab="history">历史</button>
+      <button class="tab" data-tab="resume">简历</button>
     </nav>
   </header>
 
   <main class="app-main">
-    <!-- 简历 tab -->
-    <section id="tab-resume" class="panel active">
+    <!-- 匹配 tab（默认） -->
+    <section id="tab-match" class="panel active">
+      <p class="hint">打开岗位 JD 页面后选择分析方式。正文抓取不准时，用截图框选兜底。</p>
+      <div class="btn-row">
+        <button id="analyze-jd" class="btn btn-primary">分析当前页面</button>
+        <button id="analyze-jd-shot" class="btn btn-outline">截图框选</button>
+      </div>
+
+      <div id="shot-progress" class="progress-box hidden"></div>
+      <div id="match-status" class="status"></div>
+      <div id="match-view" class="hidden"></div>
+    </section>
+
+    <!-- 历史 tab -->
+    <section id="tab-history" class="panel">
+      <p class="hint">最多保留 5 条，点击可查看详情。</p>
+      <div id="history-view"></div>
+    </section>
+
+    <!-- 简历 tab（不常用，放最后） -->
+    <section id="tab-resume" class="panel">
       <div class="field">
         <label for="api-key">DeepSeek API Key</label>
-        <div class="row">
+        <div class="btn-row">
           <input id="api-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-          <button id="save-key" class="btn btn-secondary">保存</button>
+          <button id="save-key" class="btn btn-outline">保存</button>
         </div>
         <p class="hint">Key 仅保存在本机浏览器，不会同步到云端。</p>
       </div>
@@ -30,32 +49,19 @@
       <div class="field">
         <label>上传简历（PDF）</label>
         <input id="resume-file" type="file" accept=".pdf,application/pdf" />
-        <p class="hint" style="margin-top:8px">或直接粘贴简历文字（扫描版 PDF 解析不出文字时用）：</p>
+        <p class="hint" style="margin-top:8px">或直接粘贴简历文字（扫描版 PDF 用）：</p>
         <textarea id="resume-text" rows="5" placeholder="粘贴简历文字…"></textarea>
       </div>
 
-      <button id="analyze-resume" class="btn btn-primary">分析简历（生成 AI 画像）</button>
+      <button id="analyze-resume" class="btn btn-primary">分析简历（生成画像）</button>
 
       <div id="profile-status" class="status"></div>
       <div id="profile-view" class="hidden"></div>
     </section>
-
-    <!-- 匹配 tab -->
-    <section id="tab-match" class="panel">
-      <p class="hint">打开任意岗位 JD 页面，点下面的按钮进行分析。建议先手动选中 JD 正文，结果更准。</p>
-      <button id="analyze-jd" class="btn btn-primary">分析当前页面 JD</button>
-      <div id="match-status" class="status"></div>
-      <div id="match-view" class="hidden"></div>
-    </section>
-
-    <!-- 历史 tab -->
-    <section id="tab-history" class="panel">
-      <p class="hint">最多保留 5 条，新的自动覆盖最旧的。点击可查看详情。</p>
-      <div id="history-view"></div>
-    </section>
   </main>
 
   <script src="../lib/pdf.min.js"></script>
+  <script src="../shared.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
